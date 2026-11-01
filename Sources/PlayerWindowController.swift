@@ -135,6 +135,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     private(set) var controlBar: ControlBar!
     private(set) var sidebar: SidebarView!
     private let osd = OSDView()
+    private var remoteBrowser: RemoteBrowserView?
     private let topShade = GradientView(top: true)
     private let titleLabel = Style.label(size: 13, weight: .semibold, color: Style.text)
     private let spinner = NSProgressIndicator()
@@ -224,9 +225,27 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     func open(_ urls: [URL]) {
         let media = urls.filter { Media.isPlayable($0) || Media.kind(of: $0) == .folder }
         guard !media.isEmpty else { return }
+        hideRemoteBrowser()
         player.open(media)
         window?.makeKeyAndOrderFront(nil)
     }
+
+    @objc func showRemoteBrowser(_ sender: Any?) {
+        guard let host = Settings.remoteHost else { return }
+        let browser = remoteBrowser ?? RemoteBrowserView(controller: self)
+        remoteBrowser = browser
+        if browser.superview == nil { root.addSubview(browser, positioned: .below, relativeTo: osd) }
+        browser.frame = root.bounds
+        browser.show(host: host)
+        window?.makeFirstResponder(root)
+    }
+
+    func hideRemoteBrowser() {
+        remoteBrowser?.removeFromSuperview()
+        window?.makeFirstResponder(root)
+    }
+
+    private var remoteBrowserVisible: Bool { remoteBrowser?.superview != nil }
 
     func handleDrop(_ urls: [URL]) {
         let subs = urls.filter { Media.kind(of: $0) == .subtitle }
@@ -248,7 +267,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         var types: [UTType] = [.movie, .audiovisualContent, .audio, .folder]
         for ext in Media.videoExts.union(Media.audioExts) { if let t = UTType(filenameExtension: ext) { types.append(t) } }
         panel.allowedContentTypes = types
-        if let cur = player.current { panel.directoryURL = cur.deletingLastPathComponent() }
+        if let cur = player.current, cur.isFileURL { panel.directoryURL = cur.deletingLastPathComponent() }
         panel.beginSheetModal(for: window!) { [weak self] r in
             if r == .OK { self?.open(panel.urls) }
         }
@@ -259,7 +278,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.allowedContentTypes = Media.subtitleExts.compactMap { UTType(filenameExtension: $0) }
-        panel.directoryURL = player.current?.deletingLastPathComponent()
+        if let cur = player.current, cur.isFileURL { panel.directoryURL = cur.deletingLastPathComponent() }
         panel.beginSheetModal(for: window!) { [weak self] r in
             guard r == .OK, let self else { return }
             for u in panel.urls { self.player.addSubtitle(u) }
@@ -283,6 +302,9 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
             controlBar.updateTime()
             controlBar.updateChapters()
             sidebar.reloadPlaylist()
+        case .playlist:
+            controlBar.updateNavigation()
+            sidebar.reloadPlaylist(scrollToCurrent: true)
         case .volume:
             controlBar.updateVolume()
         case .speed:
@@ -313,7 +335,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
             sidebar.reloadRecent()
             refreshState()
             showControls()
-            if let u = player.current { NSDocumentController.shared.noteNewRecentDocumentURL(u) }
+            if let u = player.current, u.isFileURL { NSDocumentController.shared.noteNewRecentDocumentURL(u) }
         case .idle, .buffering:
             refreshState()
             controlBar.updatePlay()
@@ -453,6 +475,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let b = root.bounds
         guard b.width > 0 else { return }
         home.frame = b
+        remoteBrowser?.frame = b
         // 窗口模式下视频层只占侧栏左边，玻璃侧栏底下是纯黑，不用跟着每帧视频重新模糊。
         // 全屏时窗口没法加宽，侧栏浮在画面上，画面不缩放
         let reserved = sidebarShown && !isFullScreen
@@ -635,7 +658,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         }
         let t = f * player.duration
         preview.time.stringValue = formatTime(t, likeDuration: player.duration)
-        preview.showsImage = url.isFileURL && player.hasVideo
+        preview.showsImage = player.hasVideo
         preview.chapter = Player.chapterTitle(in: player.chapters, at: t)
         let s = preview.preferredSize
         let px = scrubber.convert(NSPoint(x: scrubber.bounds.width * f, y: 0), to: root).x
@@ -656,9 +679,10 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         let chars = e.charactersIgnoringModifiers?.lowercased() ?? ""
         let mods = e.modifierFlags.intersection([.command, .option, .control, .shift])
         if e.keyCode == 53 {  // Esc
-            if isFullScreen { window?.toggleFullScreen(nil) }
+            if remoteBrowserVisible { hideRemoteBrowser() } else if isFullScreen { window?.toggleFullScreen(nil) }
             return true
         }
+        if remoteBrowserVisible { return false }
         if mods.isEmpty, chars == "f" { toggleFullScreen(); return true }
         if mods.isEmpty, e.keyCode == 36 || e.keyCode == 76 { toggleFullScreen(); return true }  // 回车
         return false
@@ -903,7 +927,8 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
         f.state = window?.level == .floating ? .on : .off
         m.addItem(withTitle: sidebarVisible ? "隐藏侧栏" : "显示侧栏", action: #selector(toggleSidebar(_:)), keyEquivalent: "").target = self
         m.addItem(.separator())
-        m.addItem(withTitle: "在访达中显示", action: #selector(revealCurrent(_:)), keyEquivalent: "").target = self
+        if let host = Settings.remoteHost { m.addItem(withTitle: host, action: #selector(showRemoteBrowser(_:)), keyEquivalent: "").target = self }
+        if player.current?.isFileURL == true { m.addItem(withTitle: "在访达中显示", action: #selector(revealCurrent(_:)), keyEquivalent: "").target = self }
         m.addItem(withTitle: "设置…", action: #selector(showSettings(_:)), keyEquivalent: "").target = self
         return m
     }
@@ -1002,12 +1027,12 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
     }
 
     @objc func revealCurrent(_ sender: Any?) {
-        if let u = player.current { NSWorkspace.shared.activateFileViewerSelecting([u]) }
+        if let u = player.current, u.isFileURL { NSWorkspace.shared.activateFileViewerSelecting([u]) }
     }
 
     @objc func openRecentItem(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? String else { return }
-        open([URL(fileURLWithPath: path)])
+        open([Media.url(forKey: path)])
     }
 
     @objc func clearRecent(_ sender: Any?) { History.shared.clear() }
@@ -1033,7 +1058,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
                 let item = menu.addItem(withTitle: Media.title(of: r.url), action: #selector(openRecentItem(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = r.path
-                item.isEnabled = FileManager.default.fileExists(atPath: r.path)
+                item.isEnabled = r.isAvailable
             }
             if !recs.isEmpty { menu.addItem(.separator()) }
             let clear = menu.addItem(withTitle: "清空最近记录", action: #selector(clearRecent(_:)), keyEquivalent: "")
@@ -1058,11 +1083,21 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         let hasFile = player.current != nil
+        // 片库开着时方向键归分栏，不快进、不调音量
+        if remoteBrowserVisible, let action = item.action,
+           [#selector(seekForward(_:)), #selector(seekBackward(_:)), #selector(volumeUp(_:)), #selector(volumeDown(_:))].contains(action) {
+            return false
+        }
         switch item.action {
         case #selector(togglePlay(_:)):
             item.title = hasFile && !player.paused ? "暂停" : "播放"
             return hasFile
         case #selector(playNext(_:)): return player.hasNext
+        case #selector(showRemoteBrowser(_:)):
+            item.isHidden = Settings.remoteHost == nil
+            if let host = Settings.remoteHost { item.title = "\(host)…" }
+            return Settings.remoteHost != nil
+        case #selector(revealCurrent(_:)): return player.current?.isFileURL == true
         case #selector(seekForward(_:)):
             item.title = "快进 \(Settings.seekStep) 秒"
             return hasFile
@@ -1071,7 +1106,7 @@ final class PlayerWindowController: NSWindowController, NSWindowDelegate, NSMenu
             return hasFile
         case #selector(playPrevious(_:)), #selector(seekForwardLong(_:)), #selector(seekBackwardLong(_:)), #selector(frameForward(_:)),
              #selector(showSpeedPanel(_:)), #selector(frameBackward(_:)), #selector(speedUp(_:)), #selector(speedDown(_:)), #selector(speedReset(_:)),
-             #selector(revealCurrent(_:)), #selector(loadSubtitleFile(_:)), #selector(subBigger(_:)), #selector(subSmaller(_:)),
+             #selector(loadSubtitleFile(_:)), #selector(subBigger(_:)), #selector(subSmaller(_:)),
              #selector(subUp(_:)), #selector(subDown(_:)), #selector(subDelayPlus(_:)), #selector(subDelayMinus(_:)), #selector(subReset(_:)):
             return hasFile
         case #selector(windowSize(_:)): return hasFile && player.videoSize != nil && !isFullScreen

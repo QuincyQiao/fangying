@@ -52,6 +52,7 @@ enum MainMenu {
 
         menu("文件") { m in
             add(m, "打开…", #selector(PlayerWindowController.openDocument(_:)), "o")
+            add(m, "远程片库…", #selector(PlayerWindowController.showRemoteBrowser(_:)), "o", [.command, .option])
             dynamic(m, "打开最近", id: "recent")
             m.addItem(.separator())
             add(m, "加载字幕文件…", #selector(PlayerWindowController.loadSubtitleFile(_:)), "o", [.command, .shift])

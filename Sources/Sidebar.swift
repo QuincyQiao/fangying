@@ -45,7 +45,7 @@ final class SidebarView: NSView {
             if !item.missing { self.controller.open([item.url]) }
         }
         recentPane.onReveal = { url in NSWorkspace.shared.activateFileViewerSelecting([url]) }
-        recentPane.onRemove = { url in History.shared.remove(path: url.path) }
+        recentPane.onRemove = { url in History.shared.remove(path: Media.key(url)) }
         recentPane.onClearAll = { History.shared.clear() }
         showTab(tab)
     }
@@ -80,7 +80,7 @@ final class SidebarView: NSView {
         playlistPane.header = p.playlist.isEmpty ? "" : folder
         playlistPane.headerDetail = p.playlist.isEmpty ? "" : "\(p.playlist.count) 个"
         playlistPane.items = p.playlist.enumerated().map { i, url in
-            let rec = History.shared.record(for: url.path)
+            let rec = History.shared.record(for: Media.key(url))
             let dur = Thumbnails.shared.cachedDuration(for: url) ?? rec?.duration ?? 0
             var detail = dur > 0 ? formatTime(dur) : ""
             var progress: Double? = nil
@@ -101,11 +101,11 @@ final class SidebarView: NSView {
 
     func reloadRecent() {
         guard tab == .recent else { return }
-        let currentPath = controller.player.current?.path
+        let currentPath = controller.player.current.map(Media.key)
         recentPane.header = ""
         recentPane.items = History.shared.records.map { r in
             let url = r.url
-            let exists = FileManager.default.fileExists(atPath: r.path)
+            let exists = r.isAvailable
             let folder = url.deletingLastPathComponent().lastPathComponent
             var detail = exists ? "\(folder) · \(relativeDay(r.updated))" : "找不到文件 · \(relativeDay(r.updated))"
             if r.path == currentPath { detail = "正在播放" }
@@ -254,7 +254,7 @@ final class MediaListPane: NSView, NSTableViewDataSource, NSTableViewDelegate, N
         let reveal = menu.addItem(withTitle: "在访达中显示", action: #selector(reveal(_:)), keyEquivalent: "")
         reveal.target = self
         reveal.tag = r
-        reveal.isEnabled = !items[r].missing
+        reveal.isEnabled = !items[r].missing && items[r].url.isFileURL
         if kind == .recent {
             let remove = menu.addItem(withTitle: "从最近记录中移除", action: #selector(remove(_:)), keyEquivalent: "")
             remove.target = self
@@ -318,14 +318,14 @@ final class MediaCell: NSTableCellView {
     required init?(coder: NSCoder) { fatalError() }
 
     func configure(_ item: MediaListPane.Item) {
-        path = item.url.path
+        path = Media.key(item.url)
         title.stringValue = item.title
         detail.stringValue = item.detail
         thumb.progress = item.progress
         playing.isHidden = !item.isCurrent
         alphaValue = item.missing ? 0.45 : 1
         thumb.image = nil
-        if item.useSnapshot, let snap = Thumbnails.shared.snapshot(for: item.url.path) {
+        if item.useSnapshot, let snap = Thumbnails.shared.snapshot(for: path) {
             thumb.image = snap
         } else if !item.missing {
             let p = path

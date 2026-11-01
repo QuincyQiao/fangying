@@ -3,8 +3,9 @@ import AppKit
 /// 没在放东西时的首页：一个「打开」和最近看过的封面。
 final class HomeView: NSView {
     unowned let controller: PlayerWindowController
-    private let background = CAGradientLayer()
+    private let background = HomeView.backdrop()
     private let openButton: PillButton
+    private let remoteButton: PillButton
     private let recentTitle = Style.label("最近看过", size: 17, weight: .semibold, color: Style.text)
     private var cards: [RecentCard] = []
     private let mark = NSImageView()
@@ -13,21 +14,37 @@ final class HomeView: NSView {
         self.controller = controller
         openButton = PillButton(title: "打开视频", symbol: "play.rectangle.on.rectangle", target: controller,
                                 action: #selector(PlayerWindowController.openDocument(_:)))
+        remoteButton = PillButton(title: "", symbol: "macmini", target: controller,
+                                  action: #selector(PlayerWindowController.showRemoteBrowser(_:)))
         super.init(frame: .zero)
         wantsLayer = true
-        background.colors = [NSColor(srgbRed: 0.13, green: 0.14, blue: 0.17, alpha: 1).cgColor,
-                             NSColor(srgbRed: 0.05, green: 0.05, blue: 0.07, alpha: 1).cgColor]
-        background.type = .radial
-        background.startPoint = CGPoint(x: 0.5, y: 0.75)
-        background.endPoint = CGPoint(x: 1.25, y: -0.1)
         layer?.addSublayer(background)
         mark.image = Style.symbol("play.circle", size: 54, weight: .ultraLight)
         mark.contentTintColor = NSColor(white: 1, alpha: 0.22)
         addSubview(mark)
         addSubview(openButton)
+        addSubview(remoteButton)
         addSubview(recentTitle)
         NotificationCenter.default.addObserver(self, selector: #selector(reload), name: History.changed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(remoteChanged), name: Settings.remoteChanged, object: nil)
+        remoteChanged()
         reload()
+    }
+
+    static func backdrop() -> CAGradientLayer {
+        let g = CAGradientLayer()
+        g.colors = [NSColor(srgbRed: 0.13, green: 0.14, blue: 0.17, alpha: 1).cgColor,
+                    NSColor(srgbRed: 0.05, green: 0.05, blue: 0.07, alpha: 1).cgColor]
+        g.type = .radial
+        g.startPoint = CGPoint(x: 0.5, y: 0.75)
+        g.endPoint = CGPoint(x: 1.25, y: -0.1)
+        return g
+    }
+
+    @objc private func remoteChanged() {
+        remoteButton.isHidden = Settings.remoteHost == nil
+        remoteButton.title = Settings.remoteHost ?? ""
+        needsLayout = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -35,7 +52,7 @@ final class HomeView: NSView {
     @objc func reload() {
         guard !isHidden || cards.isEmpty else { return }
         cards.forEach { $0.removeFromSuperview() }
-        let recs = History.shared.records.filter { FileManager.default.fileExists(atPath: $0.path) }.prefix(10)
+        let recs = History.shared.records.filter(\.isAvailable).prefix(10)
         cards = recs.map { r in
             let c = RecentCard(record: r)
             c.onOpen = { [weak self] in self?.controller.open([r.url]) }
@@ -58,10 +75,17 @@ final class HomeView: NSView {
         CATransaction.commit()
         let w = bounds.width, h = bounds.height
         let btn = openButton.preferredSize
+        let remote = remoteButton.preferredSize
+        let pillsW = btn.width + (remoteButton.isHidden ? 0 : 12 + remote.width)
+        func placePills(y: CGFloat) {
+            let x = ((w - pillsW) / 2).rounded()
+            openButton.frame = NSRect(x: x, y: y, width: btn.width, height: btn.height)
+            remoteButton.frame = NSRect(x: x + btn.width + 12, y: y, width: remote.width, height: remote.height)
+        }
 
         if cards.isEmpty {
             mark.frame = NSRect(x: (w - 70) / 2, y: h / 2 + 20, width: 70, height: 70)
-            openButton.frame = NSRect(x: (w - btn.width) / 2, y: h / 2 - 50, width: btn.width, height: btn.height)
+            placePills(y: h / 2 - 50)
             mark.isHidden = false
             return
         }
@@ -81,7 +105,7 @@ final class HomeView: NSView {
         let total = btn.height + 48 + 34 + gridH
         var y = ((h + total) / 2).rounded()
         y -= btn.height
-        openButton.frame = NSRect(x: (w - btn.width) / 2, y: y, width: btn.width, height: btn.height)
+        placePills(y: y)
         y -= 48
         recentTitle.frame = NSRect(x: left + 2, y: y - 22, width: 200, height: 22)
         y -= 34
@@ -102,6 +126,10 @@ final class PillButton: NSView {
     private let label: NSTextField
     private weak var target: AnyObject?
     private let action: Selector
+    var title: String {
+        get { label.stringValue }
+        set { label.stringValue = newValue; needsLayout = true }
+    }
     private var hovering = false { didSet { glass.tintColor = NSColor(white: hovering ? 1 : 0, alpha: hovering ? 0.10 : 0.18) } }
     private var tracking: NSTrackingArea?
 
@@ -186,7 +214,7 @@ final class RecentCard: NSView {
             Thumbnails.shared.poster(for: record.url) { [weak self] img, _ in self?.thumb.image = img }
         }
         let menu = NSMenu()
-        menu.addItem(withTitle: "在访达中显示", action: #selector(reveal), keyEquivalent: "").target = self
+        if record.url.isFileURL { menu.addItem(withTitle: "在访达中显示", action: #selector(reveal), keyEquivalent: "").target = self }
         menu.addItem(withTitle: "从最近记录中移除", action: #selector(remove), keyEquivalent: "").target = self
         self.menu = menu
     }

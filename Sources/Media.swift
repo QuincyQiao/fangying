@@ -94,7 +94,31 @@ enum Media {
     }
 
     static func title(of url: URL) -> String {
-        url.isFileURL ? url.deletingPathExtension().lastPathComponent : (url.host ?? url.absoluteString)
+        url.isFileURL || isRemote(url) ? url.deletingPathExtension().lastPathComponent : (url.host ?? url.absoluteString)
+    }
+
+    // MARK: 远程文件
+
+    static func isRemote(_ url: URL) -> Bool { url.scheme == "ssh" }
+
+    static func remoteURL(host: String, path: String) -> URL {
+        var c = URLComponents()
+        c.scheme = "ssh"
+        c.host = host
+        c.path = path
+        return c.url ?? URL(fileURLWithPath: path)
+    }
+
+    /// 观看记录和缓存用的键：本地是路径，远程是整个地址。
+    static func key(_ url: URL) -> String { url.isFileURL ? url.path : url.absoluteString }
+    static func url(forKey key: String) -> URL {
+        key.hasPrefix("ssh://") ? (URL(string: key) ?? URL(fileURLWithPath: key)) : URL(fileURLWithPath: key)
+    }
+
+    /// 交给 mpv 和 FFmpeg 打开的地址。
+    static func playbackTarget(_ url: URL) -> String {
+        if url.isFileURL { return url.path }
+        return isRemote(url) ? RemoteBridge.shared.url(for: url) : url.absoluteString
     }
 }
 

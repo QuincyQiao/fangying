@@ -19,10 +19,10 @@ enum SelfTest {
 
         let groups: [(String, (URL) -> Void)] = [
             ("media", testMedia), ("history", testHistory), ("samples", makeSamples), ("thumb", testThumbs),
-            ("mpv", testMPV), ("render", testRender),
+            ("mpv", testMPV), ("render", testRender), ("remote", testRemote),
         ]
         for (name, f) in groups {
-            if let only, only != name, !(name == "samples" && ["thumb", "mpv", "render"].contains(only)) { continue }
+            if let only, only != name, !(name == "samples" && ["thumb", "mpv", "render", "remote"].contains(only)) { continue }
             print("【\(name)】")
             f(dir)
         }
@@ -252,6 +252,180 @@ enum SelfTest {
             if ao != "coreaudio", ao != "无" { print("    注意：CoreAudio 没起来，退回了 \(ao)，调音量会有延迟") }
         }
         real.destroy()
+    }
+
+    // MARK: 远程：直接起本机的 sftp-server，协议和走 ssh 时一样
+
+    static func testRemote(_ dir: URL) {
+        let server = "/usr/libexec/sftp-server"
+        guard FileManager.default.isExecutableFile(atPath: server) else {
+            print("  跳过：这台电脑没有 sftp-server")
+            return
+        }
+        guard let ep1 = samples["测试 第1集.mkv"], let ep2 = samples["测试 第2集.mkv"] else {
+            check(false, "没有样片")
+            return
+        }
+        Remote.shared.commandOverride = [server]
+        let host = "selftest"
+        func remote(_ local: URL) -> URL { Media.remoteURL(host: host, path: local.path) }
+
+        let odd = Media.remoteURL(host: host, path: "/片库 #1/100% 好看?.mkv")
+        check(Media.url(forKey: Media.key(odd)) == odd && odd.path == "/片库 #1/100% 好看?.mkv", "特殊字符的路径来回不变")
+        check(Media.title(of: odd) == "100% 好看?" && Media.kind(of: odd) == .video && Media.isRemote(odd), "远程文件的片名和类型")
+        check(Remote.isValidHost("mac-mini.local") && !Remote.isValidHost("-oProxyCommand=x") && !Remote.isValidHost("a b"), "主机名不会被当成 ssh 参数")
+        check(Remote.isHidden("/Users/a/.cache/x.mp4") && Remote.isHidden("/Users/a/x/_工程/y.mp4") && !Remote.isHidden("/Users/a/x/y.mp4"), "隐藏和工程文件夹不进片库")
+        check(RemoteBridge.parseRange("bytes=10-19", size: 100) == 10...19 && RemoteBridge.parseRange("bytes=90-", size: 100) == 90...99
+              && RemoteBridge.parseRange("bytes=-5", size: 100) == 95...99 && RemoteBridge.parseRange("bytes=100-", size: 100) == nil, "Range 头解析")
+
+        let client = Remote.shared.client(for: host)
+        let home = try? client.home()
+        check(home?.isEmpty == false, "SFTP 连得上：\(home ?? "失败")")
+        let data = (try? Data(contentsOf: ep1)) ?? Data()
+        check((try? client.stat(ep1.path).size) == UInt64(data.count), "读到文件大小")
+        check((try? client.stat(dir.appendingPathComponent("没有这个文件").path)) == nil, "不存在的文件报错")
+
+        var listed: [RemoteEntry]?
+        Remote.shared.list(remote(dir)) { listed = $0 }
+        _ = spin(until: 5) { listed != nil }
+        check(listed?.contains { $0.name == "测试 第1集.mkv" && $0.size == UInt64(data.count) && !$0.isDirectory } == true
+              && listed?.contains { $0.name == "Subs" && $0.isDirectory } == true, "列文件夹：\(listed?.count ?? 0) 项")
+
+        var playlist: [URL] = [], subtitles: [URL] = []
+        var done = false
+        Remote.shared.neighbours(of: remote(ep1)) { playlist = $0; subtitles = $1; done = true }
+        _ = spin(until: 5) { done }
+        let names = playlist.map(\.lastPathComponent).filter { $0.hasPrefix("测试") }
+        check(names == ["测试 第1集.mkv", "测试 第2集.mkv", "测试 第10集.mp4"], "远程连播顺序：\(names.joined(separator: "、"))")
+        check(Remote.subtitles(for: remote(ep1), in: subtitles).count == 2, "同文件夹的字幕对得上片名")
+        check(Remote.subtitles(for: remote(ep2), in: subtitles).first?.path.contains("/Subs/") == true, "Subs 子文件夹里的字幕也找到")
+
+        func get(_ url: String, range: String? = nil) -> (status: Int, body: Data) {
+            var r = URLRequest(url: URL(string: url)!)
+            if let range { r.setValue(range, forHTTPHeaderField: "Range") }
+            var out = (status: 0, body: Data())
+            let finished = DispatchSemaphore(value: 0)
+            URLSession.shared.dataTask(with: r) { d, resp, _ in
+                out = ((resp as? HTTPURLResponse)?.statusCode ?? 0, d ?? Data())
+                finished.signal()
+            }.resume()
+            _ = finished.wait(timeout: .now() + 20)
+            return out
+        }
+        let target = Media.playbackTarget(remote(ep1))
+        let whole = get(target)
+        check(whole.status == 200 && whole.body == data, "转接读整个文件一字不差（\(data.count) 字节）")
+        let part = get(target, range: "bytes=1000-2999")
+        check(part.status == 206 && part.body == data.subdata(in: 1000..<3000), "转接按 Range 读中间一段")
+        let tail = get(target, range: "bytes=-500")
+        check(tail.status == 206 && tail.body == data.suffix(500), "转接读文件末尾")
+        check(get(target, range: "bytes=\(data.count)-").status == 416, "超出文件范围报 416")
+        let token = URL(string: target)!.pathComponents[1]
+        check(get(target.replacingOccurrences(of: token, with: "wrong")).status == 403, "口令不对不给读")
+        check(get(Media.playbackTarget(remote(dir.appendingPathComponent("没有这个文件.mkv")))).status == 404, "不存在的文件报 404")
+
+        let oddFolder = dir.appendingPathComponent("远程 #1%")
+        try? FileManager.default.createDirectory(at: oddFolder, withIntermediateDirectories: true)
+        let oddFile = oddFolder.appendingPathComponent("片子 #2?.mkv")
+        try? FileManager.default.copyItem(at: ep1, to: oddFile)
+        check(get(Media.playbackTarget(remote(oddFile))).body == data, "带 # % ? 的文件名也读得到")
+
+        // 传到一半连接断了：HTTP 这边不断，重连后从断点接着传
+        let bigFile = dir.appendingPathComponent("大文件.bin")
+        var big = Data(count: 40 << 20)
+        big.withUnsafeMutableBytes { raw in
+            let words = raw.bindMemory(to: UInt32.self)
+            for i in 0..<words.count { words[i] = UInt32(truncatingIfNeeded: i &* 2_654_435_761) }
+        }
+        try? big.write(to: bigFile)
+        let received = rawGet(Media.playbackTarget(remote(bigFile)), after: 4 << 20) { client.dropLink() }
+        check(received == big, "传到一半断线，重连后接着传完（\(received.count >> 20) MB）")
+
+        var info = fy_info()
+        check(fy_probe(target, &info) == 0 && abs(info.duration - 4) < 0.3, "FFmpeg 经转接读到时长 \(String(format: "%.2f", info.duration)) 秒")
+        check(Thumbnails.frame(target, seconds: 2, fraction: -1, maxW: 320, maxH: 180, keyframeOnly: true) != nil, "FFmpeg 经转接取到缩略图")
+
+        let mpv = headlessMPV()
+        var loaded = false, failed = false
+        mpv.onEvent = { e in
+            switch e {
+            case .fileLoaded: loaded = true
+            case .endFile(let reason, _): if reason == MPV_END_FILE_REASON_ERROR { failed = true }
+            default: break
+            }
+        }
+        mpv.command(["loadfile", target, "replace", "-1", "cache=yes,cache-secs=90,network-timeout=120"])
+        _ = spin(until: 10) { loaded || failed }
+        check(loaded && abs((mpv.double("duration") ?? 0) - 4) < 0.3, "mpv 经转接能放，\(String(format: "%.2f", mpv.double("duration") ?? 0)) 秒")
+        mpv.command(["seek", "3", "absolute+exact"])
+        _ = spin(until: 3) { (mpv.double("time-pos") ?? 0) > 2.9 }
+        check((mpv.double("time-pos") ?? 0) > 2.9, "经转接能跳转")
+        mpv.command(["sub-add", Media.playbackTarget(remote(dir.appendingPathComponent("测试 第1集.chs.srt"))), "auto"])
+        let sub = (mpv.node("track-list") as? [Any] ?? []).compactMap { ($0 as? [String: Any]).flatMap(Track.init) }.first { $0.type == "sub" && $0.external }
+        check(sub?.displayName(videoBaseName: "测试 第1集") == "简体中文 · SRT · 外挂", "远程字幕的名字：\(sub?.displayName(videoBaseName: "测试 第1集") ?? "无")")
+        mpv.destroy()
+
+        let h = History(directory: dir.appendingPathComponent("远程记录"))
+        let key = Media.key(remote(ep1))
+        h.update(path: key, position: 120, duration: 600, finished: false)
+        let rec = h.record(for: key)
+        check(rec?.url == remote(ep1) && rec?.isAvailable == true && rec?.resumePosition == 120, "远程片子记进度，下次接着放")
+
+        let sample = { (path: String) in
+            RemoteEntry(url: Media.remoteURL(host: host, path: path), name: "x.mp4", isDirectory: false, size: 1, modified: Date())
+        }
+        let counts = Remote.videoCounts([sample("/Users/a/片库/甲/1.mp4"), sample("/Users/a/片库/甲/2.mp4"), sample("/Users/a/片库/乙/3.mp4")])
+        check(counts["/Users/a/片库"] == 3 && counts["/Users/a/片库/甲"] == 2 && counts["/Users/a/片库/丙"] == nil, "每层文件夹的视频数")
+        let crumbs = RemotePathBar.crumbs(host: "远程", home: "/Users/a", folder: Media.remoteURL(host: host, path: "/Users/a/片库/甲"))
+        check(crumbs.map(\.title) == ["远程", "片库", "甲"] && crumbs[1].url.path == "/Users/a/片库", "路径栏从家目录算起")
+        let outside = RemotePathBar.crumbs(host: "远程", home: "/Users/a", folder: Media.remoteURL(host: host, path: "/Volumes/盘/片"))
+        check(outside.map(\.title) == ["远程", "Volumes", "盘", "片"] && outside[0].url.path == "/", "家目录外从根目录算起")
+        if let bookmark = try? dir.bookmarkData() {
+            let items: [[String: Any]] = [["Bookmark": bookmark],
+                                          ["Bookmark": bookmark, "CustomItemProperties": ["com.apple.LSSharedFileList.ItemIsHidden": true]]]
+            let archive = try? NSKeyedArchiver.archivedData(withRootObject: ["items": items] as NSDictionary, requiringSecureCoding: false)
+            let places = archive.map { Remote.finderFavorites(in: $0, home: "/Users/现在的名字") } ?? []
+            check(places.count == 1 && places[0].hasSuffix(dir.lastPathComponent), "读得出 Finder 侧边栏，隐藏项不算：\(places.first ?? "无")")
+        }
+
+        var videos: [RemoteEntry]?
+        var answered = false
+        Remote.shared.videos(host: host) { videos = $0; answered = true }
+        _ = spin(until: 10) { answered }
+        check(videos != nil, "片库查询有结果：\(videos?.count ?? 0) 个视频")
+        Remote.shared.commandOverride = nil
+    }
+
+    /// 自己收 HTTP：一边收一边在中途做点事，URLSession 做不到
+    static func rawGet(_ url: String, after bytes: Int, action: () -> Void) -> Data {
+        guard let u = URLComponents(string: url), let port = u.port else { return Data() }
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        addr.sin_port = UInt16(port).bigEndian
+        let connected = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        guard connected == 0 else { return Data() }
+        let request = Array("GET \(u.percentEncodedPath) HTTP/1.1\r\nHost: x\r\n\r\n".utf8)
+        _ = send(fd, request, request.count, 0)
+        var buffer = [UInt8](repeating: 0, count: 1 << 16)
+        var all = Data()
+        var acted = false
+        while true {
+            let n = recv(fd, &buffer, buffer.count, 0)
+            if n <= 0 { break }
+            all.append(contentsOf: buffer[0..<n])
+            if !acted, all.count > bytes {
+                acted = true
+                action()
+            }
+        }
+        guard let head = all.range(of: Data("\r\n\r\n".utf8)) else { return Data() }
+        return all.subdata(in: head.upperBound..<all.endIndex)
     }
 
     // MARK: 离屏渲染：和窗口里同一条 OpenGL 路径

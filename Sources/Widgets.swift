@@ -293,7 +293,12 @@ final class Scrubber: NSView {
 
 /// 圆角缩略图，铺满裁切；底部可显示看过的进度。
 final class ThumbView: NSView {
-    var image: NSImage? { didSet { imageLayer.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil) } }
+    var image: NSImage? {
+        didSet {
+            imageLayer.contents = image?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+            placeholder.isHidden = image != nil
+        }
+    }
     var progress: Double? { didSet { needsLayout = true } }
     var placeholderSymbol = "film" { didSet { placeholder.image = Style.symbol(placeholderSymbol, size: 18, weight: .regular) } }
     private let imageLayer = CALayer()

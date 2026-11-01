@@ -10,7 +10,9 @@ struct WatchRecord: Codable, Equatable {
     var finished: Bool
     var updated: Date
 
-    var url: URL { URL(fileURLWithPath: path) }
+    var url: URL { Media.url(forKey: path) }
+    /// 远程文件查不了有没有，当它在；真打开时才知道
+    var isAvailable: Bool { Media.isRemote(url) || FileManager.default.fileExists(atPath: path) }
     var progress: Double { duration > 0 ? min(1, position / duration) : 0 }
     /// 再打开时从这里接着放；看完了或只看了开头就从头放。
     var resumePosition: Double? {
@@ -125,6 +127,7 @@ final class Thumbnails {
     }
 
     private func posterKey(for url: URL) -> String {
+        if Media.isRemote(url) { return Thumbnails.key(Media.key(url) + "|" + Remote.shared.stamp(for: url)) }
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
         let stamp = "\(values?.fileSize ?? 0)-\(Int(values?.contentModificationDate?.timeIntervalSince1970 ?? 0))"
         return Thumbnails.key(url.path + "|" + stamp)
@@ -132,27 +135,39 @@ final class Thumbnails {
 
     func cachedDuration(for url: URL) -> Double? {
         lock.lock(); defer { lock.unlock() }
-        return durations[url.path]
+        return durations[Media.key(url)]
+    }
+
+    /// 片库滚走了的卡片不用再取封面。还没开始取的直接作废。
+    func cancelPoster(for url: URL) {
+        lock.lock()
+        pending.removeValue(forKey: Media.key(url))
+        lock.unlock()
     }
 
     /// 列表封面和时长。完成回调在主线程。
     func poster(for url: URL, completion: @escaping (NSImage?, Double?) -> Void) {
-        let memKey = url.path as NSString
+        let cacheKey = Media.key(url)
+        let memKey = cacheKey as NSString
         if let img = posters.object(forKey: memKey) {
             completion(img, cachedDuration(for: url))
             return
         }
         lock.lock()
-        if pending[url.path] != nil {
-            pending[url.path]!.append(completion)
+        if pending[cacheKey] != nil {
+            pending[cacheKey]!.append(completion)
             lock.unlock()
             return
         }
-        pending[url.path] = [completion]
+        pending[cacheKey] = [completion]
         lock.unlock()
 
         posterQueue.addOperation { [weak self] in
             guard let self else { return }
+            self.lock.lock()
+            let wanted = self.pending[cacheKey] != nil
+            self.lock.unlock()
+            guard wanted else { return }
             let key = self.posterKey(for: url)
             let jpg = self.directory.appendingPathComponent("封面/\(key).jpg")
             let meta = self.directory.appendingPathComponent("封面/\(key).txt")
@@ -161,19 +176,20 @@ final class Thumbnails {
             if let img = NSImage(contentsOf: jpg) {
                 image = img
                 duration = (try? String(contentsOf: meta, encoding: .utf8)).flatMap { Double($0) }
-            } else if FileManager.default.fileExists(atPath: url.path) {
+            } else if Media.isRemote(url) || FileManager.default.fileExists(atPath: url.path) {
+                let target = Media.playbackTarget(url)
                 var info = fy_info()
-                if fy_probe(url.path, &info) >= 0 { duration = info.duration }
+                if fy_probe(target, &info) >= 0 { duration = info.duration }
                 let fraction = (duration ?? 0) > 30 ? 0.1 : 0.3
-                if let cg = Thumbnails.frame(url.path, seconds: 0, fraction: fraction, maxW: 320, maxH: 180, keyframeOnly: true) {
+                if let cg = Thumbnails.frame(target, seconds: 0, fraction: fraction, maxW: 320, maxH: 180, keyframeOnly: true) {
                     image = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
                     Thumbnails.writeJPEG(cg, to: jpg)
                 }
                 try? String(duration ?? 0).write(to: meta, atomically: true, encoding: .utf8)
             }
             self.lock.lock()
-            if let d = duration { self.durations[url.path] = d }
-            let callbacks = self.pending.removeValue(forKey: url.path) ?? []
+            if let d = duration { self.durations[cacheKey] = d }
+            let callbacks = self.pending.removeValue(forKey: cacheKey) ?? []
             self.lock.unlock()
             if let image { self.posters.setObject(image, forKey: memKey) }
             DispatchQueue.main.async { callbacks.forEach { $0(image, duration) } }
@@ -192,7 +208,7 @@ final class Thumbnails {
             let stale = token != self.previewToken
             self.lock.unlock()
             if stale { return }
-            let cg = Thumbnails.frame(url.path, seconds: seconds, fraction: -1, maxW: 320, maxH: 180, keyframeOnly: true)
+            let cg = Thumbnails.frame(Media.playbackTarget(url), seconds: seconds, fraction: -1, maxW: 320, maxH: 180, keyframeOnly: true)
             let img = cg.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) }
             DispatchQueue.main.async {
                 self.lock.lock()

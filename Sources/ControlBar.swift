@@ -15,6 +15,7 @@ final class ControlBar: NSView {
     let subtitleButton: IconButton
     let audioButton: IconButton
     let sidebarButton: IconButton
+    let libraryButton: IconButton
     let fullscreenButton: IconButton
     let elapsed = Style.label(size: 12, weight: .medium, color: Style.secondary, mono: true)
     let remaining = Style.label(size: 12, weight: .medium, color: Style.secondary, mono: true)
@@ -31,13 +32,14 @@ final class ControlBar: NSView {
         subtitleButton = IconButton("captions.bubble", size: 15, target: controller, action: #selector(PlayerWindowController.showSubtitleMenu(_:)))
         audioButton = IconButton("waveform", size: 15, target: controller, action: #selector(PlayerWindowController.showAudioMenu(_:)))
         sidebarButton = IconButton("sidebar.right", size: 15, target: controller, action: #selector(PlayerWindowController.toggleSidebar(_:)))
+        libraryButton = IconButton("macmini", size: 14, target: controller, action: #selector(PlayerWindowController.showRemoteBrowser(_:)))
         fullscreenButton = IconButton("arrow.up.left.and.arrow.down.right", size: 14, target: controller, action: #selector(PlayerWindowController.toggleFullScreenFromBar(_:)))
         super.init(frame: .zero)
 
         glass.contentView = content
         addSubview(glass)
         for v in [playButton, prevButton, nextButton, volumeButton, volumeSlider, speedButton, subtitleButton,
-                  audioButton, sidebarButton, fullscreenButton, elapsed, remaining, scrubber] as [NSView] {
+                  audioButton, sidebarButton, libraryButton, fullscreenButton, elapsed, remaining, scrubber] as [NSView] {
             content.addSubview(v)
         }
         elapsed.alignment = .left
@@ -59,6 +61,7 @@ final class ControlBar: NSView {
         subtitleButton.toolTip = "字幕"
         audioButton.toolTip = "音轨"
         sidebarButton.toolTip = "侧栏"
+        libraryButton.toolTip = "远程片库"
         fullscreenButton.toolTip = "全屏"
     }
 
@@ -100,6 +103,8 @@ final class ControlBar: NSView {
         place(subtitleButton, x: x, size: 32); x -= 48
         speedButton.isHidden = narrow
         speedButton.frame = NSRect(x: x, y: rowMid - 14, width: 46, height: 28)
+        libraryButton.isHidden = w < 600 || Settings.remoteHost == nil
+        place(libraryButton, x: x - 36, size: 32)
 
         // 下排进度
         let barMid: CGFloat = 22

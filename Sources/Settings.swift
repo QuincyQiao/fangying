@@ -15,15 +15,30 @@ enum Settings {
         get { UserDefaults.standard.bool(forKey: "单击画面暂停") }
         set { UserDefaults.standard.set(newValue, forKey: "单击画面暂停") }
     }
+
+    static let remoteChanged = Notification.Name("local.fangying.remote-changed")
+
+    /// 远程电脑在 SSH 配置里的名字。不填就不显示远程片库
+    static var remoteHost: String? {
+        get {
+            let s = UserDefaults.standard.string(forKey: "远程电脑")?.trimmingCharacters(in: .whitespaces) ?? ""
+            return !s.isEmpty && Remote.isValidHost(s) ? s : nil
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "远程电脑")
+            NotificationCenter.default.post(name: remoteChanged, object: nil)
+        }
+    }
 }
 
 final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     private let stepField = NSTextField()
     private let stepper = NSStepper()
     private let clickPopup = NSPopUpButton()
+    private let hostField = NSTextField()
 
     init() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 132),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 178),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.title = "设置"
         window.appearance = NSAppearance(named: .darkAqua)
@@ -34,7 +49,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         let v = window.contentView!
         let labelX: CGFloat = 24, controlX: CGFloat = 168
         let seekLabel = Style.label("左右方向键跳过", size: 14)
-        seekLabel.frame = NSRect(x: labelX, y: 80, width: 136, height: 20)
+        seekLabel.frame = NSRect(x: labelX, y: 126, width: 136, height: 20)
         v.addSubview(seekLabel)
 
         let formatter = NumberFormatter()
@@ -44,7 +59,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         stepField.formatter = formatter
         stepField.font = .monospacedDigitSystemFont(ofSize: 14, weight: .regular)
         stepField.alignment = .center
-        stepField.frame = NSRect(x: controlX, y: 78, width: 56, height: 24)
+        stepField.frame = NSRect(x: controlX, y: 124, width: 56, height: 24)
         stepField.delegate = self
         v.addSubview(stepField)
 
@@ -54,23 +69,33 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         stepper.valueWraps = false
         stepper.target = self
         stepper.action = #selector(stepperChanged)
-        stepper.frame = NSRect(x: controlX + 60, y: 78, width: 20, height: 24)
+        stepper.frame = NSRect(x: controlX + 60, y: 124, width: 20, height: 24)
         v.addSubview(stepper)
 
         let unit = Style.label("秒", size: 14)
-        unit.frame = NSRect(x: controlX + 88, y: 80, width: 30, height: 20)
+        unit.frame = NSRect(x: controlX + 88, y: 126, width: 30, height: 20)
         v.addSubview(unit)
 
         let clickLabel = Style.label("单击画面", size: 14)
-        clickLabel.frame = NSRect(x: labelX, y: 34, width: 136, height: 20)
+        clickLabel.frame = NSRect(x: labelX, y: 80, width: 136, height: 20)
         v.addSubview(clickLabel)
 
         clickPopup.addItems(withTitles: ["不做任何事", "播放或暂停"])
         clickPopup.font = .systemFont(ofSize: 14)
         clickPopup.target = self
         clickPopup.action = #selector(clickChanged)
-        clickPopup.frame = NSRect(x: controlX - 3, y: 30, width: 150, height: 28)
+        clickPopup.frame = NSRect(x: controlX - 3, y: 76, width: 150, height: 28)
         v.addSubview(clickPopup)
+
+        let hostLabel = Style.label("远程电脑", size: 14)
+        hostLabel.frame = NSRect(x: labelX, y: 34, width: 136, height: 20)
+        v.addSubview(hostLabel)
+
+        hostField.placeholderString = "SSH 名称"
+        hostField.font = .systemFont(ofSize: 14)
+        hostField.frame = NSRect(x: controlX, y: 32, width: 144, height: 24)
+        hostField.delegate = self
+        v.addSubview(hostField)
         refresh()
     }
 
@@ -80,6 +105,7 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
         stepField.integerValue = Settings.seekStep
         stepper.integerValue = Settings.seekStep
         clickPopup.selectItem(at: Settings.clickToPause ? 1 : 0)
+        hostField.stringValue = Settings.remoteHost ?? ""
     }
 
     func show(over parent: NSWindow?) {
@@ -100,10 +126,17 @@ final class SettingsWindowController: NSWindowController, NSTextFieldDelegate {
     @objc private func clickChanged() { Settings.clickToPause = clickPopup.indexOfSelectedItem == 1 }
 
     func controlTextDidChange(_ obj: Notification) {
+        if obj.object as? NSTextField === hostField { return }
         guard let n = Int(stepField.stringValue), Settings.seekStepRange.contains(n) else { return }
         Settings.seekStep = n
         stepper.integerValue = n
     }
 
-    func controlTextDidEndEditing(_ obj: Notification) { refresh() }
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if obj.object as? NSTextField === hostField {
+            let s = hostField.stringValue.trimmingCharacters(in: .whitespaces)
+            Settings.remoteHost = Remote.isValidHost(s) ? s : nil
+        }
+        refresh()
+    }
 }

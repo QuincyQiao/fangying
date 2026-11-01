@@ -32,10 +32,16 @@ struct Track: Equatable {
         albumArt = dict["albumart"] as? Bool ?? false
     }
 
+    /// 外挂字幕的文件名。远程字幕是转接地址，里面的中文是转义过的
+    private var externalName: String? {
+        guard let f = externalFilename else { return nil }
+        return f.hasPrefix("http") ? (f.removingPercentEncoding ?? f) : f
+    }
+
     /// 外挂字幕文件名里视频名后面那一截，比如「电影.chs&eng.ass」里的「chs&eng」。
     func externalHint(videoBaseName: String?) -> String? {
-        guard external, let f = externalFilename else { return nil }
-        var stem = URL(fileURLWithPath: f).deletingPathExtension().lastPathComponent
+        guard external, let name = externalName else { return nil }
+        var stem = URL(fileURLWithPath: name).deletingPathExtension().lastPathComponent
         if let base = videoBaseName, stem.hasPrefix(base) { stem = String(stem.dropFirst(base.count)) }
         stem = stem.trimmingCharacters(in: CharacterSet(charactersIn: ". _-[]()"))
         return stem.isEmpty ? nil : stem
@@ -73,7 +79,7 @@ struct Track: Equatable {
         var name: String
         let t = title?.trimmingCharacters(in: .whitespaces) ?? ""
         if external {
-            name = g?.name ?? externalHint(videoBaseName: videoBaseName) ?? URL(fileURLWithPath: externalFilename ?? "").lastPathComponent
+            name = g?.name ?? externalHint(videoBaseName: videoBaseName) ?? URL(fileURLWithPath: externalName ?? "").lastPathComponent
         } else if !t.isEmpty {
             // 「CHS」「chs&eng」这类代号换成中文名；写成句子的标题照原样
             let codeLike = t.count <= 12 && t.unicodeScalars.allSatisfy { $0.isASCII } && !t.contains(" ")
@@ -105,7 +111,7 @@ struct Track: Equatable {
 
 /// 播放核心：管 mpv、播放列表、观看记录、正在播放信息、防睡眠。界面通过 onChange 收变化。
 final class Player {
-    enum Change { case file, position, pause, duration, volume, speed, tracks, video, chapters, subtitle, idle, buffering, cache, ended, error(String), resumed(Double) }
+    enum Change { case file, playlist, position, pause, duration, volume, speed, tracks, video, chapters, subtitle, idle, buffering, cache, ended, error(String), resumed(Double) }
 
     let mpv: MPV
     var onChange: ((Change) -> Void)?
@@ -142,6 +148,8 @@ final class Player {
     private var lastSnapshot: [String: Date] = [:]
     private var sleepAssertion: IOPMAssertionID = 0
     private var pendingResume: Double?
+    private var remoteSubtitles: [URL] = []
+    private var addedSubtitles: Set<URL> = []
     private let snapshotQueue = DispatchQueue(label: "local.fangying.snapshot", qos: .utility)
 
     static let defaultsVolume = "音量"
@@ -201,7 +209,37 @@ final class Player {
         let (items, start) = Media.playlist(for: urls)
         guard !items.isEmpty else { return }
         playlist = items
+        remoteSubtitles = []
         play(at: start)
+        if let url = current, Media.isRemote(url), items.count == 1 { loadRemoteNeighbours(of: url) }
+    }
+
+    /// 远程文件的同文件夹列表要走网络，先放起来，列表回来再补上连播和字幕。
+    private func loadRemoteNeighbours(of url: URL) {
+        Remote.shared.neighbours(of: url) { [weak self] list, subtitles in
+            guard let self, self.current == url else { return }
+            self.remoteSubtitles = subtitles
+            if let i = list.firstIndex(of: url) {
+                self.playlist = list
+                self.index = i
+                self.onChange?(.playlist)
+            }
+            self.addRemoteSubtitles()
+        }
+    }
+
+    /// mpv 的 sub-auto 只看本地文件夹，远程的字幕这里自己加。要等片子打开之后。
+    private func addRemoteSubtitles() {
+        guard let url = current, Media.isRemote(url), !loading else { return }
+        let subs = Remote.subtitles(for: url, in: remoteSubtitles).filter { !addedSubtitles.contains($0) }
+        guard !subs.isEmpty else { return }
+        addedSubtitles.formUnion(subs)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, mpv] in
+            for s in subs { mpv.command(["sub-add", Media.playbackTarget(s), "auto"]) }
+            DispatchQueue.main.async {
+                if self?.current == url { self?.chooseSubtitle() }
+            }
+        }
     }
 
     func play(at i: Int) {
@@ -212,14 +250,18 @@ final class Player {
         let url = playlist[i]
         eofReached = false
         position = 0
-        duration = Thumbnails.shared.cachedDuration(for: url) ?? History.shared.record(for: url.path)?.duration ?? 0
+        let key = Media.key(url)
+        duration = Thumbnails.shared.cachedDuration(for: url) ?? History.shared.record(for: key)?.duration ?? 0
         tracks = []
         chapters = []
         loading = true
-        pendingResume = History.shared.record(for: url.path)?.resumePosition
-        var args = ["loadfile", url.isFileURL ? url.path : url.absoluteString, "replace", "-1"]
+        pendingResume = History.shared.record(for: key)?.resumePosition
+        addedSubtitles = []
+        var args = ["loadfile", Media.playbackTarget(url), "replace", "-1"]
         var opts: [String] = []
         if let r = pendingResume { opts.append("start=\(r)") }
+        // 网络流 mpv 默认能缓存多少读多少，按流量计费时很浪费；提前 90 秒够了
+        if Media.isRemote(url) { opts += ["cache=yes", "cache-secs=90", "network-timeout=\(Int(RemoteBridge.reconnectWait))"] }
         if !opts.isEmpty { args.append(opts.joined(separator: ",")) }
         mpv.command(args)
         mpv.set("pause", false)
@@ -341,8 +383,9 @@ final class Player {
             loading = false
             idle = false
             if let d = mpv.double("duration"), d > 0 { duration = d }
-            if let url = current { History.shared.started(path: url.path, duration: duration) }
+            if let url = current { History.shared.started(path: Media.key(url), duration: duration) }
             chooseSubtitle()
+            addRemoteSubtitles()
             if let r = pendingResume { onChange?(.resumed(r)) }
             pendingResume = nil
             updateNowPlaying()
@@ -352,7 +395,7 @@ final class Player {
             if reason == MPV_END_FILE_REASON_ERROR {
                 let msg = String(cString: mpv_error_string(error))
                 NSLog("播放失败：%@", msg)
-                onChange?(.error("这个文件放不了"))
+                onChange?(.error(current.flatMap { Media.isRemote($0) ? $0.host : nil }.map { "放不了，可能连不上 \($0)" } ?? "这个文件放不了"))
             }
         case .playbackRestart:
             updateNowPlaying()
@@ -449,7 +492,7 @@ final class Player {
     private func reachedEnd() {
         guard let url = current else { return }
         if duration > 0 { position = duration }
-        History.shared.update(path: url.path, position: 0, duration: duration, finished: true)
+        History.shared.update(path: Media.key(url), position: 0, duration: duration, finished: true)
         if hasNext {
             play(at: index + 1)
         } else {
@@ -460,15 +503,16 @@ final class Player {
     // MARK: 观看记录
 
     func saveProgress(snapshot: Bool, sync: Bool = false) {
-        guard let url = current, url.isFileURL, duration > 0, !loading else { return }
+        guard let url = current, url.isFileURL || Media.isRemote(url), duration > 0, !loading else { return }
         lastHistoryWrite = Date()
+        let key = Media.key(url)
         let remaining = duration - position
         let finished = eofReached || position / duration >= 0.95 || remaining < 10
-        History.shared.update(path: url.path, position: position, duration: duration, finished: finished)
+        History.shared.update(path: key, position: position, duration: duration, finished: finished)
         guard snapshot, hasVideo else { return }
-        if !sync, let last = lastSnapshot[url.path], Date().timeIntervalSince(last) < 10 { return }
-        lastSnapshot[url.path] = Date()
-        takeSnapshot(for: url.path, sync: sync)
+        if !sync, let last = lastSnapshot[key], Date().timeIntervalSince(last) < 10 { return }
+        lastSnapshot[key] = Date()
+        takeSnapshot(for: key, sync: sync)
     }
 
     func takeSnapshot(for path: String, sync: Bool) {
@@ -491,10 +535,10 @@ final class Player {
 
     /// 退出前：记下进度和停留画面。
     func prepareToQuit() {
-        if let url = current, url.isFileURL, duration > 0, !loading {
+        if let url = current, url.isFileURL || Media.isRemote(url), duration > 0, !loading {
             let finished = eofReached || position / duration >= 0.95 || duration - position < 10
-            History.shared.update(path: url.path, position: position, duration: duration, finished: finished)
-            if hasVideo { takeSnapshot(for: url.path, sync: true) }
+            History.shared.update(path: Media.key(url), position: position, duration: duration, finished: finished)
+            if hasVideo { takeSnapshot(for: Media.key(url), sync: true) }
         }
         History.shared.save()
         releaseSleepAssertion()

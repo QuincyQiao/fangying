@@ -36,7 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 tab = ["列表": .playlist, "最近": .recent, "字幕": .subtitles][launchArgs[safe: i + 1] ?? ""]
                 i += 1
             case "--pause": pause = true
-            default: if !a.hasPrefix("-") { files.append(URL(fileURLWithPath: a)) }
+            default: if !a.hasPrefix("-") { files.append(a.hasPrefix("ssh://") ? Media.url(forKey: a) : URL(fileURLWithPath: a)) }
             }
             i += 1
         }
@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let tab { c.setSidebar(visible: true, tab: tab) }
             }
         }
+        // 截图检查远程片库：FANGYING_DEMO_REMOTE=1
+        if ProcessInfo.processInfo.environment["FANGYING_DEMO_REMOTE"] != nil { controller.showRemoteBrowser(nil) }
         // 截图检查进度条悬停预览：FANGYING_DEMO_HOVER=0.6
         if let h = ProcessInfo.processInfo.environment["FANGYING_DEMO_HOVER"], let f = Double(h) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in

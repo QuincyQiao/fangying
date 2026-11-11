@@ -58,7 +58,7 @@ done
 # 改过库路径之后跑一下包里的程序，确认库都能从包里加载
 "$contents/MacOS/Fangying" --self-test bundle
 
-if [[ -n "${FANGYING_STAGE_ONLY:-}" ]]; then
+if [[ -n "${FANGYING_STAGE_ONLY:-}${SOFTWARE_SYNC_STAGE_ONLY:-}" ]]; then
     print -r -- "已打包：$staged_app"
     exit 0
 fi
